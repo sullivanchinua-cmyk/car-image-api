@@ -21,9 +21,35 @@ HEADERS = {
 TIMEOUT = 8
 MAX_COUNT = 100
 
+# Terms that indicate the query is already car-related
+CAR_TERMS = {
+    "car", "cars", "vehicle", "vehicles", "auto", "automobile", "automobiles",
+    "truck", "suv", "sedan", "coupe", "hatchback", "convertible", "van",
+    "pickup", "crossover", "wagon", "jeep", "supercar", "hypercar",
+    "toyota", "honda", "ford", "bmw", "mercedes", "audi", "volkswagen",
+    "chevrolet", "chevy", "nissan", "hyundai", "kia", "mazda", "subaru",
+    "lexus", "infiniti", "acura", "cadillac", "buick", "gmc", "dodge",
+    "chrysler", "jeep", "ram", "tesla", "porsche", "ferrari", "lamborghini",
+    "maserati", "bentley", "rolls", "royce", "bugatti", "mclaren", "aston",
+    "jaguar", "land", "rover", "range", "volvo", "peugeot", "renault",
+    "fiat", "alfa", "romeo", "mitsubishi", "suzuki", "isuzu", "genesis",
+    "rivian", "lucid", "polestar", "mini", "smart", "seat", "skoda",
+    "camry", "civic", "mustang", "corvette", "charger", "challenger",
+    "wrangler", "4runner", "highlander", "rav4", "cr-v", "pilot",
+    "f-150", "silverado", "ram 1500", "tundra", "tacoma", "frontier",
+}
+
+
+def enforce_car_query(query: str) -> str:
+    """Ensure the query targets car images — prepend 'car' if no car term found."""
+    words = set(query.lower().split())
+    if not words.intersection(CAR_TERMS):
+        return f"car {query}"
+    return query
+
 
 def fetch_duckduckgo(query: str, limit: int) -> list[str]:
-    """Fetch image URLs from DuckDuckGo using the ddgs library."""
+    """Fetch car image URLs from DuckDuckGo."""
     try:
         results = DDGS().images(query, max_results=limit)
         urls = [r["image"] for r in results if r.get("image")]
@@ -35,20 +61,39 @@ def fetch_duckduckgo(query: str, limit: int) -> list[str]:
 
 
 def fetch_bing(query: str, limit: int) -> list[str]:
-    """Fetch image URLs from Bing image search."""
+    """Fetch car image URLs from Bing Images."""
     try:
-        url = f"https://www.bing.com/images/search?q={requests.utils.quote(query)}&form=HDRSC2&first=1"
+        encoded = requests.utils.quote(query)
+        url = (
+            f"https://www.bing.com/images/search"
+            f"?q={encoded}&form=HDRSC2&first=1&count=50&qft=+filterui:photo-photo"
+        )
         res = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         res.raise_for_status()
-        matches = re.findall(r'"murl":"(https?[^"]+)"', res.text)
+
+        # Primary pattern used by Bing's JSON blobs
+        matches = re.findall(r'"murl"\s*:\s*"(https?[^"]+)"', res.text)
+
+        # Fallback: og-style image URLs embedded in the page
         if not matches:
-            print(f"[bing] no matches — status {res.status_code}, response snippet: {res.text[:300]!r}")
+            matches = re.findall(r'imgurl=([^&"]+)', res.text)
+            matches = [requests.utils.unquote(m) for m in matches]
+
+        if not matches:
+            print(
+                f"[bing] no matches — status {res.status_code}, "
+                f"snippet: {res.text[:300]!r}"
+            )
+
         urls = []
         for m in matches:
             try:
                 urls.append(m.encode().decode("unicode_escape"))
             except Exception:
                 urls.append(m)
+
+        # Keep only http/https image URLs, drop Bing redirect URLs
+        urls = [u for u in urls if u.startswith("http") and "bing.com" not in u]
         urls = urls[:limit]
         print(f"[bing] '{query}' -> {len(urls)} images")
         return urls
@@ -59,9 +104,12 @@ def fetch_bing(query: str, limit: int) -> list[str]:
 
 @app.route("/api/search")
 def search():
-    query = request.args.get("q", "").strip()
-    if not query:
+    raw_query = request.args.get("q", "").strip()
+    if not raw_query:
         return jsonify({"status": "error", "message": "Missing q parameter"}), 400
+
+    # Always enforce car-only results
+    query = enforce_car_query(raw_query)
 
     try:
         count = int(request.args.get("count", 70))
@@ -109,7 +157,7 @@ def search():
     if bing_results:
         engines_used.append("bing")
 
-    # Deduplicate while preserving order, then shuffle
+    # Deduplicate while preserving order, then shuffle for a good mix
     seen: set[str] = set()
     combined: list[str] = []
     for url in ddg_results + bing_results:
@@ -122,6 +170,7 @@ def search():
 
     return jsonify({
         "status": "success",
+        "query_used": query,
         "engines_used": engines_used,
         "count": len(combined),
         "images": combined,

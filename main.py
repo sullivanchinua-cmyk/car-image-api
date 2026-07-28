@@ -6,7 +6,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import requests
 from flask import Flask, jsonify, request
 from flask_cors import CORS
-from duckduckgo_search import DDGS
+from ddgs import DDGS
 
 app = Flask(__name__)
 CORS(app)
@@ -27,9 +27,10 @@ def fetch_duckduckgo(query: str, limit: int) -> list[str]:
     try:
         results = DDGS().images(query, max_results=limit)
         urls = [r["image"] for r in results if r.get("image")]
+        print(f"[duckduckgo] '{query}' -> {len(urls)} images")
         return urls
     except Exception as e:
-        print(f"[DuckDuckGo] Error: {e}")
+        print(f"[duckduckgo] failed for '{query}': {e}")
         return []
 
 
@@ -37,18 +38,22 @@ def fetch_bing(query: str, limit: int) -> list[str]:
     """Fetch image URLs from Bing image search."""
     try:
         url = f"https://www.bing.com/images/search?q={requests.utils.quote(query)}&form=HDRSC2&first=1"
-        resp = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
-        resp.raise_for_status()
-        matches = re.findall(r'"murl":"(https?[^"]+)"', resp.text)
+        res = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
+        res.raise_for_status()
+        matches = re.findall(r'"murl":"(https?[^"]+)"', res.text)
+        if not matches:
+            print(f"[bing] no matches — status {res.status_code}, response snippet: {res.text[:300]!r}")
         urls = []
         for m in matches:
             try:
                 urls.append(m.encode().decode("unicode_escape"))
             except Exception:
                 urls.append(m)
-        return urls[:limit]
+        urls = urls[:limit]
+        print(f"[bing] '{query}' -> {len(urls)} images")
+        return urls
     except Exception as e:
-        print(f"[Bing] Error: {e}")
+        print(f"[bing] failed for '{query}': {e}")
         return []
 
 
@@ -80,7 +85,7 @@ def search():
             try:
                 result = future.result()
             except Exception as e:
-                print(f"[{engine}] Future error: {e}")
+                print(f"[{engine}] future error: {e}")
                 result = []
             if engine == "duckduckgo":
                 ddg_results = result

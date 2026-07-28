@@ -16,7 +16,11 @@ HEADERS = {
         "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
         "AppleWebKit/537.36 (KHTML, like Gecko) "
         "Chrome/124.0.0.0 Safari/537.36"
-    )
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
 }
 TIMEOUT = 8
 MAX_COUNT = 100
@@ -25,23 +29,25 @@ MAX_COUNT = 100
 CAR_TERMS = {
     "car", "cars", "vehicle", "vehicles", "auto", "automobile", "automobiles",
     "truck", "suv", "sedan", "coupe", "hatchback", "convertible", "van",
-    "pickup", "crossover", "wagon", "jeep", "supercar", "hypercar",
+    "pickup", "crossover", "wagon", "supercar", "hypercar",
     "toyota", "honda", "ford", "bmw", "mercedes", "audi", "volkswagen",
     "chevrolet", "chevy", "nissan", "hyundai", "kia", "mazda", "subaru",
     "lexus", "infiniti", "acura", "cadillac", "buick", "gmc", "dodge",
     "chrysler", "jeep", "ram", "tesla", "porsche", "ferrari", "lamborghini",
-    "maserati", "bentley", "rolls", "royce", "bugatti", "mclaren", "aston",
-    "jaguar", "land", "rover", "range", "volvo", "peugeot", "renault",
-    "fiat", "alfa", "romeo", "mitsubishi", "suzuki", "isuzu", "genesis",
-    "rivian", "lucid", "polestar", "mini", "smart", "seat", "skoda",
-    "camry", "civic", "mustang", "corvette", "charger", "challenger",
-    "wrangler", "4runner", "highlander", "rav4", "cr-v", "pilot",
-    "f-150", "silverado", "ram 1500", "tundra", "tacoma", "frontier",
+    "maserati", "bentley", "rolls", "bugatti", "mclaren", "aston",
+    "jaguar", "rover", "volvo", "peugeot", "renault", "fiat", "alfa",
+    "mitsubishi", "suzuki", "isuzu", "genesis", "rivian", "lucid",
+    "polestar", "mini", "skoda", "camry", "civic", "mustang", "corvette",
+    "charger", "challenger", "wrangler", "4runner", "highlander", "rav4",
+    "cr-v", "f-150", "silverado", "tundra", "tacoma",
 }
+
+# Image file extensions to validate URLs
+IMAGE_EXTS = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp")
 
 
 def enforce_car_query(query: str) -> str:
-    """Ensure the query targets car images — prepend 'car' if no car term found."""
+    """Prepend 'car' if the query contains no car-related term."""
     words = set(query.lower().split())
     if not words.intersection(CAR_TERMS):
         return f"car {query}"
@@ -61,39 +67,43 @@ def fetch_duckduckgo(query: str, limit: int) -> list[str]:
 
 
 def fetch_bing(query: str, limit: int) -> list[str]:
-    """Fetch car image URLs from Bing Images."""
+    """Fetch car image URLs from Bing Images async endpoint."""
     try:
         encoded = requests.utils.quote(query)
+        # Use Bing's async endpoint — returns consistent JSON blobs
         url = (
-            f"https://www.bing.com/images/search"
-            f"?q={encoded}&form=HDRSC2&first=1&count=50&qft=+filterui:photo-photo"
+            f"https://www.bing.com/images/async"
+            f"?q={encoded}&first=1&count={min(limit, 50)}"
+            f"&adlt=off&qft=+filterui:photo-photo"
         )
         res = requests.get(url, headers=HEADERS, timeout=TIMEOUT)
         res.raise_for_status()
 
-        # Primary pattern used by Bing's JSON blobs
-        matches = re.findall(r'"murl"\s*:\s*"(https?[^"]+)"', res.text)
+        # Primary: murl field in Bing's JSON data blobs
+        matches = re.findall(r'"murl"\s*:\s*"(https?://[^"]+)"', res.text)
 
-        # Fallback: og-style image URLs embedded in the page
+        # Fallback: src attributes in <img> tags
         if not matches:
-            matches = re.findall(r'imgurl=([^&"]+)', res.text)
-            matches = [requests.utils.unquote(m) for m in matches]
+            matches = re.findall(r'<img[^>]+src="(https?://[^"]+)"', res.text)
 
         if not matches:
             print(
                 f"[bing] no matches — status {res.status_code}, "
-                f"snippet: {res.text[:300]!r}"
+                f"snippet: {res.text[:400]!r}"
             )
+            return []
 
+        # Decode unicode escapes, keep only real image URLs
         urls = []
         for m in matches:
             try:
-                urls.append(m.encode().decode("unicode_escape"))
+                decoded = m.encode().decode("unicode_escape")
             except Exception:
-                urls.append(m)
+                decoded = m
+            # Skip Bing's own CDN thumbnails (th.bing.com) — keep original sources
+            if decoded.startswith("http") and "th.bing.com" not in decoded:
+                urls.append(decoded)
 
-        # Keep only http/https image URLs, drop Bing redirect URLs
-        urls = [u for u in urls if u.startswith("http") and "bing.com" not in u]
         urls = urls[:limit]
         print(f"[bing] '{query}' -> {len(urls)} images")
         return urls

@@ -1,0 +1,120 @@
+PASTE THIS TO THE REPLIT AGENT (start a fresh Repl, then give it this whole prompt)
+=====================================================================================
+
+Build a Python Flask backend for a Car Image API that will run on Replit
+(0.0.0.0:8080) and serve car photos to my Netlify app.
+
+DEPENDENCIES TO INSTALL
+------------------------
+flask
+flask-cors
+requests
+ddgs   (actively-maintained DuckDuckGo search library — do NOT hand-roll
+        DuckDuckGo scraping with a manual vqd-token regex, it breaks every
+        time DuckDuckGo changes their page format)
+
+ANTI-ERROR & STEALTH ARCHITECTURE (apply to every route)
+-------------------------------------------------------------
+- CORS(app) enabled globally so requests from Netlify/local browsers are
+  never blocked.
+- Modern desktop User-Agent header on every outgoing scrape request:
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+- Strict 8-second timeout on EVERY outgoing HTTP request — no exceptions.
+  A request with no timeout can hang the worker thread forever if an engine
+  never responds; that is not acceptable.
+- Every external call wrapped in its own try/except. If one engine fails,
+  log it with print() and continue — never let one dependency failure turn
+  into a 500 for the whole request.
+
+ANTI-INFINITE-LOOP RULES — READ THIS SECTION CAREFULLY
+------------------------------------------------------------
+This service must NEVER be able to hang or loop forever, even under bad
+input or a fully-blocked search engine. Specifically:
+
+1. NO retry loops. The "shortfall fill" behavior below is allowed to make
+   ONE extra follow-up request to the working engine — not a while loop,
+   not a recursive retry, not "keep trying until we hit `count`". One
+   extra call, take whatever it returns, move on. If that's still short of
+   `count`, return fewer than `count` images rather than looping.
+2. NO `while True` anywhere in this codebase without an unconditional,
+   unreachable-otherwise break AND a hard iteration cap as a second safety
+   net (e.g. `for _ in range(MAX_ITER): ... break`). Prefer avoiding
+   `while True` entirely — every loop in this service should be a bounded
+   `for` loop over a fixed-size list (image results, engines, etc.), never
+   a loop whose exit condition depends on external network data.
+3. NO recursive functions that call themselves to "try again" — recursion
+   depth on a flaky network condition is exactly how a service quietly
+   eats memory/CPU until it crashes. Use a single function call plus the
+   one-time fallback described in rule 1, not recursion.
+4. ThreadPoolExecutor usage: each submitted task (DuckDuckGo fetch, Bing
+   fetch) already has its own 8-second timeout on its internal HTTP calls,
+   so `as_completed()` cannot hang indefinitely waiting on a stuck thread.
+   Do not add any additional blocking wait without a timeout parameter.
+5. `count` from the query string must be clamped to a sane max (e.g. 100)
+   before being used anywhere, so a request like `?count=999999999` can't
+   be used to force huge/slow loops or huge response payloads.
+6. If you add any caching or "keep polling until fresh data" logic later,
+   it must be time-based (e.g. cache for 10 minutes) — never a loop that
+   polls until a condition becomes true.
+
+Once you've written the code, re-read every loop and every retry path in
+main.py specifically checking it against the 6 rules above before telling
+me it's done.
+
+CONCURRENT MULTI-ENGINE PIPELINE (DuckDuckGo + Bing)
+---------------------------------------------------------
+- Use concurrent.futures.ThreadPoolExecutor(max_workers=2) to query
+  DuckDuckGo and Bing Images AT THE SAME TIME (not one after another).
+- DuckDuckGo: use the `ddgs` library — `DDGS().images(query, max_results=limit)`
+  — pull the "image" field from each result.
+- Bing: GET https://www.bing.com/images/search?q={query}&form=HDRSC2&first=1
+  with the stealth headers above, then regex the HTML for
+  `"murl":"(https?[^"]+)"` and unicode-unescape each match to get real URLs.
+- Request ~35 images from each engine (count // 2) for a target of 70 total.
+- Shortfall fill (see anti-loop rule 1 above): if one engine returns zero
+  results, make exactly ONE follow-up request to the other engine asking
+  for the shortfall amount. Do not loop this.
+- Deduplicate the combined URL list while preserving order, then
+  random.shuffle() it so DuckDuckGo and Bing results are thoroughly mixed
+  rather than sitting in two separate blocks.
+
+API ENDPOINTS
+-----------------
+1. GET /api/search?q={query}&count=70
+   Returns:
+   {
+     "status": "success",
+     "engines_used": ["duckduckgo", "bing"],
+     "count": 70,
+     "images": ["https://...", "https://..."]
+   }
+   `engines_used` should only list engines that actually returned at least
+   one result this run. If `q` is missing, return 400 with
+   {"status": "error", "message": "Missing q parameter"}.
+   Clamp `count` to a max of 100 (see anti-loop rule 5).
+
+2. GET /api/ping
+   Returns {"status": "alive"} — used for UptimeRobot 24/7 keep-alive
+   monitoring.
+
+FILE STRUCTURE
+-----------------
+Single main.py at the project root (Replit runs main.py by default).
+app.run(host="0.0.0.0", port=8080) under if __name__ == "__main__".
+
+TESTING BEFORE YOU TELL ME IT'S DONE
+----------------------------------------
+Actually run these from the Replit Shell (or webview) and show me the real
+JSON output, not just that the server started:
+
+  curl "http://localhost:8080/api/search?q=toyota+camry&count=10"
+  curl "http://localhost:8080/api/ping"
+
+If /api/search comes back with "images": [] even though the request
+succeeds, print the raw response status code + a text snippet from both
+the DuckDuckGo and Bing calls to the console so we can see whether it's a
+real empty result, a CAPTCHA/block page, or something else — don't leave
+it silently returning nothing.
+
+Also confirm explicitly, in your own words, that you checked the 6
+anti-infinite-loop rules above against the final code before finishing.
